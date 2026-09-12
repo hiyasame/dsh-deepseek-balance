@@ -1,0 +1,31 @@
+# dsh-deepseek-balance bundle patch.
+#
+# This file is the `dsh.bundle.patch` layer of the package: when the plugin is
+# installed through the official CLI —
+#
+#   dsh plugin --profile web add file:/path/to/dsh-deepseek-balance
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages
+# and, seeing this declaration, appends `dsh-deepseek-balance` to the bundle
+# stack. The profile boot then merges THIS patch, a single `insert` of the
+# plugin row, exactly like a manual mount line in the profile's own
+# cordis.patch.yml.
+#
+# Optional host configuration (all fields optional):
+#
+#   - insert:
+#       - id: deepseek-balance
+#         name: 'dsh-deepseek-balance'
+#         config:
+#           baseURL: https://api.deepseek.com
+#           apiKeyEnv: DEEPSEEK_API_KEY
+#           pollMs: 10000
+#           cacheTtlMs: 10000
+#           timeoutMs: 10000
+#
+# `pollMs` (default 10000) is the balance refresh interval; it is reported to
+# the browser so the poll cadence lives in one place. `cacheTtlMs` defaults to
+# `pollMs`, so each refresh interval costs at most one provider request.
+- insert:
+    - id: deepseek-balance
+      name: 'dsh-deepseek-balance'
