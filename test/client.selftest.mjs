@@ -108,11 +108,6 @@ function loadBundle() {
 
   const requireStub = (specifier) => {
     if (specifier === 'react') return react
-    if (specifier === 'react-dom') {
-      return {
-        createPortal: (children, container) => ({ type: 'portal', props: { container }, children: [children] }),
-      }
-    }
     throw new Error(`undeclared module request: ${specifier}`)
   }
 
@@ -233,11 +228,10 @@ await check('injects its stylesheet at materialization', () => {
   assert.match(doc.styles[0].textContent, /\.dsb_pill\{/)
 })
 
-await check('resolves only baseline shell modules', () => {
-  // The require stub throws on anything outside react/react-dom, so reaching
-  // the module face at all proves no other request was made.
-  assert.equal(module.inject.includes('react'), false)
-  assert.equal(module.inject.includes('react-dom'), false)
+await check('resolves only the react shell module', () => {
+  // The require stub accepts `react` alone, so reaching the module face proves
+  // the bundle no longer drags in react-dom for a portal it does not need.
+  assert.deepEqual(module.inject, ['slots', 'locale'])
 })
 
 let component
@@ -359,15 +353,13 @@ await check('forces a refresh once the payload is older than the interval', asyn
   }
 })
 
-await check('renders the loading pill, with its own row as the fallback host', () => {
+await check('renders the pill as one inline dock item', () => {
   const tree = hooks.render(component, { t })
-  const row = findElement(tree, (node) => node.props?.['data-composer-balance-row'] === true)
-  const anchor = findElement(tree, (node) => node.props?.['data-composer-balance'] === true)
-  assert.ok(row !== undefined, 'without the strip the pill owns a row')
-  assert.equal(row.props.className, 'dsb_root')
-  assert.match(textOf(anchor), /Balance …/)
-  assert.equal(anchor.props.className, 'dsb_anchor')
-  const button = findElement(anchor, (node) => node.type === 'button')
+  assert.equal(tree.type, 'span', 'the dock item must be the anchor itself, not a wrapping row')
+  assert.equal(tree.props.className, 'dsb_anchor')
+  assert.equal(tree.props['data-composer-balance'], true)
+  assert.match(textOf(tree), /Balance …/)
+  const button = findElement(tree, (node) => node.type === 'button')
   assert.equal(button.props['aria-haspopup'], 'dialog')
   assert.equal(button.props['aria-expanded'], false)
   assert.equal(button.props.className, 'dsb_pill', 'the pill must carry its scoped class')
@@ -472,48 +464,104 @@ await check('arms and releases the dismiss listeners while open', () => {
   assert.equal(doc.listeners.length, 0, 'closing must release both listeners')
 })
 
-/**
- * Run the host-discovery effect against a stubbed strip.
- * @param stats - the element `[data-composer-stats]` should resolve to, or null.
- * @returns the adopted host value and the effect cleanup.
- */
-function discoverHost(stats) {
-  const previous = doc.querySelector
-  doc.querySelector = (selector) => (selector === '[data-composer-stats]' ? stats : null)
-  renderWith([])
-  const cleanup = hooks.effects[2]()
-  const adopted = hooks.setters.filter((entry) => entry.index === 3).at(-1)
-  return { adopted: adopted?.value, cleanup, restore: () => { doc.querySelector = previous } }
-}
+await check('never claims the dock row width', () => {
+  // Regression guard for the pre-0.1.6-alpha.2 layout: the dock
+  // (`InputBar.module.css .dock`) lays the host's statistics pills, this pill,
+  // and ContextMeter out on one centered flex line. A wrapper with
+  // `width:100%` makes the balance pill the widest item on that line, which
+  // shrinks every sibling and ellipsizes the host's own figures. The pill must
+  // therefore stay a content-sized inline-flex item.
+  const styleText = doc.styles[0].textContent
+  assert.equal(/\.dsb_root\{/.test(styleText), false, 'the full-width row wrapper must be gone')
+  assert.equal(styleText.includes('data-composer-stats'), false)
+  const anchorRule = /\.dsb_anchor\{([^}]*)\}/.exec(styleText)
+  assert.ok(anchorRule !== null, 'the anchor rule must exist')
+  const declarations = anchorRule[1].split(';').map((part) => part.trim()).filter((part) => part !== '')
+  assert.equal(
+    declarations.some((part) => /^width\s*:\s*100%$/.test(part)),
+    false,
+    'the anchor must not stretch to the row width',
+  )
+  assert.equal(declarations.includes('min-width:0'), true)
+  assert.match(anchorRule[1], /max-width:100%/)
+  assert.match(anchorRule[1], /display:inline-flex/)
 
-await check('portals the pill into the native statistics strip', () => {
-  const stats = { nodeType: 1 }
-  const { adopted, cleanup, restore } = discoverHost(stats)
-  try {
-    assert.equal(adopted, stats, 'the strip must be adopted as the portal host')
-    const tree = renderWith([{ status: 'ready', payload: readyPayload() }, false, false, stats])
-    assert.equal(tree.type, 'portal', 'the pill must render through a portal when the strip exists')
-    assert.equal(tree.props.container, stats)
-    assert.match(textOf(tree), /Balance ¥47\.49/)
-    const anchor = findElement(tree, (node) => node.props?.['data-composer-balance'] === true)
-    assert.equal(anchor.props.className, 'dsb_anchor', 'the portaled node must be the flex-item wrapper')
-  } finally {
-    cleanup()
-    restore()
+  for (const state of [
+    { status: 'loading' },
+    { status: 'ready', payload: readyPayload() },
+    { status: 'error', code: 'NETWORK', message: 'offline' },
+  ]) {
+    const tree = renderWith([state, false])
+    const wrappers = []
+    const collect = (node) => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) {
+        for (const child of node) collect(child)
+        return
+      }
+      if (typeof node.type !== 'function') wrappers.push(node)
+      collect(node.children)
+    }
+    collect(tree)
+    assert.ok(
+      wrappers.some((node) => node.props?.['data-composer-balance'] === true),
+      'every state must render the bare anchor as the dock item',
+    )
+    assert.equal(
+      wrappers.some((node) => node.props?.['data-composer-balance-row'] === true),
+      false,
+      'no state may wrap the pill in its own row',
+    )
   }
 })
 
-await check('keeps its own row while the strip is absent', () => {
-  const { adopted, cleanup, restore } = discoverHost(null)
+await check('carries the host pill type ramp', () => {
+  // The dock's own pills get their type from `StatsPills.module.css`
+  // `.root`/`.pill` and `ContextMeter.module.css` `.trigger`:
+  // `font-size: var(--dsh-content-font-size-secondary, 13px)` with
+  // `line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px))`.
+  // The anchor is a direct dock child like those roots, so it must declare the
+  // same ramp; otherwise `font: inherit` picks up the composer's 14px base and
+  // the balance reads visibly larger than its neighbours.
+  const styleText = doc.styles[0].textContent
+  const anchorRule = /\.dsb_anchor\{([^}]*)\}/.exec(styleText)
+  assert.ok(anchorRule !== null, 'the anchor rule must exist')
+  assert.match(anchorRule[1], /font-size:var\(--dsh-content-font-size-secondary,13px\)/)
+  assert.match(
+    anchorRule[1],
+    /line-height:calc\(20px \+ var\(--dsh-content-font-delta-secondary,0px\)\)/,
+  )
+  assert.equal(
+    /\.dsb_pill\{[^}]*font-size:/.test(styleText),
+    false,
+    'the pill must inherit the anchor ramp through `font: inherit`',
+  )
+})
+
+await check('stops watching the DOM for a portal target', () => {
+  // The old host row carried `[data-composer-stats]`; the new dock exposes no
+  // selector, and the slot renders this component directly. A surviving
+  // 500ms interval would only cost work.
+  const intervals = []
+  const realSetInterval = globalThis.setInterval
+  const realFetch = globalThis.fetch
+  const cleanups = []
+  globalThis.setInterval = (...args) => {
+    intervals.push(args)
+    return 0
+  }
+  globalThis.fetch = async () => new Response('not found', { status: 404 })
   try {
-    assert.equal(adopted, undefined, 'no strip means no portal host')
-    const tree = renderWith([{ status: 'ready', payload: readyPayload() }])
-    assert.equal(tree.type, 'div')
-    assert.equal(tree.props['data-composer-balance-row'], true)
-    assert.match(textOf(tree), /Balance ¥47\.49/)
+    renderWith([])
+    for (const effect of hooks.effects) {
+      const cleanup = effect()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
+    }
+    assert.equal(intervals.length, 0, 'the bundle must not poll the DOM')
   } finally {
-    cleanup()
-    restore()
+    globalThis.setInterval = realSetInterval
+    globalThis.fetch = realFetch
+    for (const cleanup of cleanups) cleanup()
   }
 })
 
